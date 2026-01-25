@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.music.sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Replace YOUR_USERNAME with your macOS username -->
+        <string>/Users/YOUR_USERNAME/PycharmProjects/AppleMusicSongTitleFetch/run_music_sync.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/YOUR_USERNAME/PycharmProjects/AppleMusicSongTitleFetch</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>60</integer>
+</dict>
+</plist>

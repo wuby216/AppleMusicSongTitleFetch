@@ -8,7 +8,7 @@ from datetime import datetime  # Added for timestamps
 
 # Configuration
 FETCH_ALL = True
-PLAYLIST_NAME = ""   # Specify the Playlist name if FETCH_ALL is False
+PLAYLIST_NAME = ""  # Specify the Playlist name if FETCH_ALL is False
 PROJECT_DIR = Path(__file__).parent.resolve()
 DB_PATH = PROJECT_DIR / "processed_songs.json"
 BASE_URL = "https://itunes.apple.com/search"
@@ -18,6 +18,7 @@ def log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
+
 def open_music():
     """Ensures the Music app is running before processing."""
     log("Ensuring Apple Music is open...")
@@ -26,7 +27,8 @@ def open_music():
     script = 'tell application "Music" to launch'
     run_applescript(script)
     # Give the app 5 seconds to initialize its library
-    time.sleep(10)
+    time.sleep(5)
+
 
 def load_db():
     if os.path.exists(DB_PATH):
@@ -41,6 +43,16 @@ def save_to_db(persistent_id):
         db.append(persistent_id)
         with open(DB_PATH, 'w') as f:
             json.dump(db, f)
+
+
+def save_full_db(db_list):
+    """Overwrites the JSON database with a synced list of IDs."""
+    try:
+        with open(DB_PATH, 'w', encoding='utf-8') as f:
+            # indent=4 makes the JSON file human-readable
+            json.dump(db_list, f, indent=4)
+    except Exception as e:
+        log(f"Error saving to DB: {e}")
 
 
 def run_applescript(script):
@@ -63,14 +75,13 @@ def get_japanese_metadata(song_name, artist):
 
 
 # --- Main Logic ---
-processed_ids = load_db()
-log(f"Loaded {len(processed_ids)} previously processed songs.")
+old_db = load_db()
+log(f"Loaded {len(old_db)} previously processed songs.")
 
 # 1. Ensure Music is open before we try to pull track data
 open_music()
 
 # 2. Fetch tracks from ALL user playlists
-log("Scanning all user playlists for tracks...")
 get_all_tracks_script = '''
 tell application "Music"
     set out to ""
@@ -99,36 +110,55 @@ end tell
 
 raw_tracks = ""
 if FETCH_ALL is True:
+    log("Scanning all user playlists for tracks...")
     raw_tracks = run_applescript(get_all_tracks_script)
 else:
+    log(f"Scanning playlists {PLAYLIST_NAME} for tracks...")
     raw_tracks = run_applescript(get_tracks_script)
 
-# 3. Unique processing (One song might be in multiple playlists)
-seen_this_session = set()
-track_lines = raw_tracks.split('\n')
-log(f"Found {len(track_lines)} total entries across all playlists.")
+# Create a set of IDs currently in Music
+current_library_ids = set()
+tracks_to_process = []
+unique_tracks_map = {}
 
 process_count = 0
 skipped_count = 0
 for line in raw_tracks.split('\n'):
-    if not line: continue
+    if not line or "|" not in line: continue
     p_id, name, artist = line.split('|')
 
-    # Check if we've already done this song
-    if p_id in processed_ids:
+    if p_id not in unique_tracks_map:
+        unique_tracks_map[p_id] = (name, artist)
+
+log(f"Found {len(raw_tracks.splitlines())} entries. Consolidated to {len(unique_tracks_map)} unique songs.")
+
+# Keep only IDs that are still present in the Music app
+# Notes: Only do the two-way sync when FETCH_ALL is true
+synced_db = [p_id for p_id in old_db if p_id in unique_tracks_map] if FETCH_ALL is True else old_db
+
+removed_count = len(old_db) - len(synced_db)
+if removed_count > 0:
+    log(f"Pruned {removed_count} dead IDs from database.")
+    save_full_db(synced_db)
+
+# Process new tracks
+new_updates = 0
+for p_id, (name, artist) in unique_tracks_map.items():
+    if p_id in synced_db:
         skipped_count += 1
         # log(f"Skipping: {name} (Already in Japanese)")
         continue
 
     log(f"Processing: {name} by {artist}...")
-    jp_data = get_japanese_metadata(name, artist)
 
+    jp_data = get_japanese_metadata(name, artist)
     if jp_data:
         # 1. Escape Backslashes first (AppleScript's escape character)
         # 2. Escape Double Quotes (") which break AppleScript strings
         def escape_for_applescript(text):
             if not text: return ""
             return text.replace("\\", "\\\\").replace('"', '\\"')
+
 
         jp_title = escape_for_applescript(jp_data['trackName'])
         jp_album = escape_for_applescript(jp_data['collectionName'])
@@ -174,4 +204,3 @@ for line in raw_tracks.split('\n'):
     time.sleep(1)  # Rate limit protection
 
 log(f"Sync complete. Total processed: {process_count}. Total skipped: {skipped_count}")
-

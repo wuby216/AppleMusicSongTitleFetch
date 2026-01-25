@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# --- CONFIGURATION ---
+# Replace YOUR_USERNAME with your macOS username
+PROJECT_DIR="/Users/YOUR_USERNAME/PycharmProjects/AppleMusicSongTitleFetch"
+# Ensure the Python path matches your system's version
+PYTHON_EXEC="/Library/Frameworks/Python.framework/Versions/3.11/bin/python3"
+
+# --- EXECUTION ---
+cd "$PROJECT_DIR"
+
+# Run the script and append logs to /tmp
+"$PYTHON_EXEC" "$PROJECT_DIR/main.py" >> /tmp/music_sync.out 2>> /tmp/music_sync.err

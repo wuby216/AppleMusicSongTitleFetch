@@ -1,0 +1,3 @@
+# logfilename          [owner:group]  mode count size when  flags [/pid_file] [sig_num]
+/tmp/music_sync.out    :              644  7     *    $W0   J
+/tmp/music_sync.err    :              644  7     *    $W0   J
