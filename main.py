@@ -2,6 +2,7 @@ import subprocess
 import requests
 import time
 import json
+import sys
 import os
 from pathlib import Path
 from datetime import datetime  # Added for timestamps
@@ -12,6 +13,23 @@ PLAYLIST_NAME = ""  # Specify the Playlist name if FETCH_ALL is False
 PROJECT_DIR = Path(__file__).parent.resolve()
 DB_PATH = PROJECT_DIR / "processed_songs.json"
 BASE_URL = "https://itunes.apple.com/search"
+LOCK_FILE = "/tmp/music_sync.lock"
+
+
+def check_single_instance():
+    # If the lock file exists, check if that process is actually still alive
+    if os.path.exists(LOCK_FILE):
+        log("An instance is already running. Exiting to prevent overlap.")
+        sys.exit(0)
+
+    # Create the lock file
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def remove_lock():
+    if os.path.exists(LOCK_FILE):
+        os.remove(LOCK_FILE)
 
 def log(message):
     """Prints a message with a 2026-standard timestamp."""
@@ -75,132 +93,139 @@ def get_japanese_metadata(song_name, artist):
 
 
 # --- Main Logic ---
-old_db = load_db()
-log(f"Loaded {len(old_db)} previously processed songs.")
 
-# 1. Ensure Music is open before we try to pull track data
-open_music()
+check_single_instance()
 
-# 2. Fetch tracks from ALL user playlists
-get_all_tracks_script = '''
-tell application "Music"
-    set out to ""
-    set userPlaylists to (every playlist whose special kind is none)
-    repeat with p in userPlaylists
-        set theTracks to tracks of p
+try:
+    old_db = load_db()
+    log(f"Loaded {len(old_db)} previously processed songs.")
+
+    # 1. Ensure Music is open before we try to pull track data
+    open_music()
+
+    # 2. Fetch tracks from ALL user playlists
+    get_all_tracks_script = '''
+    tell application "Music"
+        set out to ""
+        set userPlaylists to (every playlist whose special kind is none)
+        repeat with p in userPlaylists
+            set theTracks to tracks of p
+            repeat with t in theTracks
+                set out to out & (persistent ID of t) & "|" & (name of t) & "|" & (artist of t) & "\n"
+            end repeat
+        end repeat
+        return out
+    end tell
+    '''
+
+    # Fetch tracks for a specific play list
+    get_tracks_script = f'''
+    tell application "Music"
+        set out to ""
+        set theTracks to tracks of playlist "{PLAYLIST_NAME}"
         repeat with t in theTracks
             set out to out & (persistent ID of t) & "|" & (name of t) & "|" & (artist of t) & "\n"
         end repeat
-    end repeat
-    return out
-end tell
-'''
+        return out
+    end tell
+    '''
 
-# Fetch tracks for a specific play list
-get_tracks_script = f'''
-tell application "Music"
-    set out to ""
-    set theTracks to tracks of playlist "{PLAYLIST_NAME}"
-    repeat with t in theTracks
-        set out to out & (persistent ID of t) & "|" & (name of t) & "|" & (artist of t) & "\n"
-    end repeat
-    return out
-end tell
-'''
-
-raw_tracks = ""
-if FETCH_ALL is True:
-    log("Scanning all user playlists for tracks...")
-    raw_tracks = run_applescript(get_all_tracks_script)
-else:
-    log(f"Scanning playlists {PLAYLIST_NAME} for tracks...")
-    raw_tracks = run_applescript(get_tracks_script)
-
-# Create a set of IDs currently in Music
-current_library_ids = set()
-tracks_to_process = []
-unique_tracks_map = {}
-
-process_count = 0
-skipped_count = 0
-for line in raw_tracks.split('\n'):
-    if not line or "|" not in line: continue
-    p_id, name, artist = line.split('|')
-
-    if p_id not in unique_tracks_map:
-        unique_tracks_map[p_id] = (name, artist)
-
-log(f"Found {len(raw_tracks.splitlines())} entries. Consolidated to {len(unique_tracks_map)} unique songs.")
-
-# Keep only IDs that are still present in the Music app
-# Notes: Only do the two-way sync when FETCH_ALL is true
-synced_db = [p_id for p_id in old_db if p_id in unique_tracks_map] if FETCH_ALL is True else old_db
-
-removed_count = len(old_db) - len(synced_db)
-if removed_count > 0:
-    log(f"Pruned {removed_count} dead IDs from database.")
-    save_full_db(synced_db)
-
-# Process new tracks
-new_updates = 0
-for p_id, (name, artist) in unique_tracks_map.items():
-    if p_id in synced_db:
-        skipped_count += 1
-        # log(f"Skipping: {name} (Already in Japanese)")
-        continue
-
-    log(f"Processing: {name} by {artist}...")
-
-    jp_data = get_japanese_metadata(name, artist)
-    if jp_data:
-        # 1. Escape Backslashes first (AppleScript's escape character)
-        # 2. Escape Double Quotes (") which break AppleScript strings
-        def escape_for_applescript(text):
-            if not text: return ""
-            return text.replace("\\", "\\\\").replace('"', '\\"')
-
-
-        jp_title = escape_for_applescript(jp_data['trackName'])
-        jp_album = escape_for_applescript(jp_data['collectionName'])
-        jp_artist = escape_for_applescript(jp_data['artistName'])
-
-        update_script = f'''
-        tell application "Music"
-            try
-                -- 1. Explicitly find the track in the playlist context
-                set t to (some track whose persistent ID is "{p_id}")
-                
-                -- 2. Force Add & Metadata Write
-                -- Tahoe Workaround: Toggling 'favorited' forces a server-side handshake
-                -- set favorited of t to true
-                -- delay 0.5
-                
-                -- 3. Standard add command
-                set libTrack to duplicate t to library playlist 1
-                
-                -- 4. Apply metadata to the NEW library version
-                set name of libTrack to "{jp_title}"
-                set sort name of libTrack to "{jp_title}"
-                set album of libTrack to "{jp_album}"
-                set artist of libTrack to "{jp_artist}"
-                set sort artist of libTrack to "{jp_artist}"
-                
-                return "Success"
-            on error
-                return "Error or Already in Library"
-            end try
-        end tell
-        '''
-        res = run_applescript(update_script)
-        if "Success" in res or "Already" in res:
-            save_to_db(p_id)
-            log(f"  -> Updated: {jp_title} by {jp_artist}")
-            process_count += 1
-        else:
-            log(f"  -> {res}")
+    raw_tracks = ""
+    if FETCH_ALL is True:
+        log("Scanning all user playlists for tracks...")
+        raw_tracks = run_applescript(get_all_tracks_script)
     else:
-        log("  -> No Japanese metadata found.")
+        log(f"Scanning playlists {PLAYLIST_NAME} for tracks...")
+        raw_tracks = run_applescript(get_tracks_script)
 
-    time.sleep(1)  # Rate limit protection
+    # Create a set of IDs currently in Music
+    current_library_ids = set()
+    tracks_to_process = []
+    unique_tracks_map = {}
 
-log(f"Sync complete. Total processed: {process_count}. Total skipped: {skipped_count}")
+    process_count = 0
+    skipped_count = 0
+    for line in raw_tracks.split('\n'):
+        if not line or "|" not in line: continue
+        p_id, name, artist = line.split('|')
+
+        if p_id not in unique_tracks_map:
+            unique_tracks_map[p_id] = (name, artist)
+
+    log(f"Found {len(raw_tracks.splitlines())} entries. Consolidated to {len(unique_tracks_map)} unique songs.")
+
+    # Keep only IDs that are still present in the Music app
+    # Notes: Only do the two-way sync when FETCH_ALL is true
+    synced_db = [p_id for p_id in old_db if p_id in unique_tracks_map] if FETCH_ALL is True else old_db
+
+    removed_count = len(old_db) - len(synced_db)
+    if removed_count > 0:
+        log(f"Pruned {removed_count} dead IDs from database.")
+        save_full_db(synced_db)
+
+    # Process new tracks
+    new_updates = 0
+    for p_id, (name, artist) in unique_tracks_map.items():
+        if p_id in synced_db:
+            skipped_count += 1
+            # log(f"Skipping: {name} (Already in Japanese)")
+            continue
+
+        log(f"Processing: {name} by {artist}...")
+
+        jp_data = get_japanese_metadata(name, artist)
+        if jp_data:
+            # 1. Escape Backslashes first (AppleScript's escape character)
+            # 2. Escape Double Quotes (") which break AppleScript strings
+            def escape_for_applescript(text):
+                if not text: return ""
+                return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+            jp_title = escape_for_applescript(jp_data['trackName'])
+            jp_album = escape_for_applescript(jp_data['collectionName'])
+            jp_artist = escape_for_applescript(jp_data['artistName'])
+
+            update_script = f'''
+            tell application "Music"
+                try
+                    -- 1. Explicitly find the track in the playlist context
+                    set t to (some track whose persistent ID is "{p_id}")
+                    
+                    -- 2. Force Add & Metadata Write
+                    -- Tahoe Workaround: Toggling 'favorited' forces a server-side handshake
+                    -- set favorited of t to true
+                    -- delay 0.5
+                    
+                    -- 3. Standard add command
+                    set libTrack to duplicate t to library playlist 1
+                    
+                    -- 4. Apply metadata to the NEW library version
+                    set name of libTrack to "{jp_title}"
+                    set sort name of libTrack to "{jp_title}"
+                    set album of libTrack to "{jp_album}"
+                    set artist of libTrack to "{jp_artist}"
+                    set sort artist of libTrack to "{jp_artist}"
+                    
+                    return "Success"
+                on error
+                    return "Error or Already in Library"
+                end try
+            end tell
+            '''
+            res = run_applescript(update_script)
+            if "Success" in res or "Already" in res:
+                save_to_db(p_id)
+                log(f"  -> Updated: {jp_title} by {jp_artist}")
+                process_count += 1
+            else:
+                log(f"  -> {res}")
+        else:
+            log("  -> No Japanese metadata found.")
+
+        time.sleep(1)  # Rate limit protection
+
+    log(f"Sync complete. Total processed: {process_count}. Total skipped: {skipped_count}")
+
+finally:
+    remove_lock()
