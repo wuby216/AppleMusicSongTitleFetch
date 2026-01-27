@@ -31,22 +31,35 @@ def remove_lock():
     if os.path.exists(LOCK_FILE):
         os.remove(LOCK_FILE)
 
+def is_music_running():
+    """Checks if the Music app process is actually running."""
+    script = 'tell application "System Events" to (name of processes) contains "Music"'
+    return run_applescript(script) == "true"
+
 def log(message):
     """Prints a message with a 2026-standard timestamp."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
-
 def open_music():
-    """Ensures the Music app is running before processing."""
-    log("Ensuring Apple Music is open...")
-    # 'activate' opens the app if closed and brings it to focus
-    # 'launch' opens it in the background if you prefer it to be silent
-    script = 'tell application "Music" to launch'
-    run_applescript(script)
-    # Give the app 5 seconds to initialize its library
-    time.sleep(5)
+    """Ensures Music is open and refuses to continue if it's not."""
+    if not is_music_running():
+        log("Apple Music is closed. Attempting to launch...")
+        run_applescript('tell application "Music" to launch')
+        # Give it a longer window (10s) to initialize the database on launch
+        time.sleep(10)
 
+        # Double-check if it actually opened
+        if not is_music_running():
+            log("CRITICAL ERROR: Could not launch Apple Music. Exiting to protect database.")
+            sys.exit(1)
+
+    # Optional: Verify if the library is actually accessible
+    # This prevents the 'empty library' bug if the app is open but 'stuck'
+    library_check = run_applescript('tell application "Music" to count user playlists')
+    if library_check == "" or int(library_check) == 0:
+        log("WARNING: Music is open but no playlists found. Library might still be loading. Exiting.")
+        sys.exit(1)
 
 def load_db():
     if os.path.exists(DB_PATH):
