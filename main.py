@@ -94,7 +94,7 @@ def run_applescript(script):
 
 def get_japanese_metadata(song_name, artist):
     base_url = BASE_URL
-    params = {"term": f"{song_name} {artist}", "country": "jp", "entity": "song", "limit": 1}
+    params = {"term": f"{song_name}, {artist}", "country": "jp", "entity": "song", "limit": 1}
     try:
         response = requests.get(base_url, params=params)
         data = response.json()
